@@ -20,6 +20,8 @@ const AZURE_API_VERSION: &str = "2024-10-21";
 pub struct OpenAIDriver {
     api_key: Zeroizing<String>,
     base_url: String,
+    /// Optional exact chat completions endpoint URL override (e.g. a scoped proxy route).
+    chat_endpoint_override: Option<String>,
     client: reqwest::Client,
     extra_headers: Vec<(String, String)>,
     /// When true, uses Azure OpenAI URL format and `api-key` header.
@@ -32,6 +34,7 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
+            chat_endpoint_override: None,
             client: reqwest::Client::builder()
                 .user_agent(crate::USER_AGENT)
                 .build()
@@ -50,6 +53,7 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
+            chat_endpoint_override: None,
             client: reqwest::Client::builder()
                 .user_agent(crate::USER_AGENT)
                 .build()
@@ -57,6 +61,12 @@ impl OpenAIDriver {
             extra_headers: Vec::new(),
             azure_mode: true,
         }
+    }
+
+    /// Override the exact chat completions endpoint URL instead of appending `/chat/completions`.
+    pub fn with_chat_endpoint(mut self, endpoint: String) -> Self {
+        self.chat_endpoint_override = Some(endpoint);
+        self
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
@@ -77,6 +87,9 @@ impl OpenAIDriver {
     /// Standard OpenAI: `{base_url}/chat/completions`
     /// Azure OpenAI:    `{base_url}/{model}/chat/completions?api-version=2024-10-21`
     fn chat_url(&self, model: &str) -> String {
+        if let Some(ref endpoint) = self.chat_endpoint_override {
+            return endpoint.clone();
+        }
         if self.azure_mode {
             format!(
                 "{}/{}/chat/completions?api-version={}",

@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# Pinned, non-root Linux x86_64 OCI worker image for Cathedral Bittensor CPU sandboxes.
+# Build: docker build --platform linux/amd64 -f docker/Dockerfile.worker -t freeagents/openfang-worker:bounty .
+
+FROM rust:1.86-slim-bookworm AS builder
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+COPY xtask ./xtask
+COPY agents ./agents
+COPY packages ./packages
+
+ARG LTO=true
+ARG CODEGEN_UNITS=1
+ENV CARGO_PROFILE_RELEASE_LTO=${LTO} \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CODEGEN_UNITS}
+
+RUN cargo build --release --locked --bin openfang-worker
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 openfang \
+    && useradd --system --uid 10001 --gid openfang --home-dir /nonexistent --shell /usr/sbin/nologin openfang
+
+COPY --from=builder /build/target/release/openfang-worker /usr/local/bin/openfang-worker
+COPY --from=builder /build/agents/freeagents-bounty.toml /opt/openfang/agents/freeagents-bounty.toml
+
+RUN chmod 0555 /usr/local/bin/openfang-worker \
+    && chmod 0444 /opt/openfang/agents/freeagents-bounty.toml
+
+USER 10001:10001
+
+ENV RUST_LOG=info
+
+# Outbound-only worker; no inbound ports exposed.
+ENTRYPOINT ["/usr/local/bin/openfang-worker"]
+CMD ["--help"]

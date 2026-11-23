@@ -4000,6 +4000,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "openfang-bittensor"
+version = "0.6.9"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "openfang-runtime",
+ "openfang-types",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "openfang-channels"
 version = "0.6.9"
 dependencies = [
@@ -4320,6 +4338,36 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "openfang-worker"
+version = "0.6.9"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "openfang-bittensor",
+ "openfang-memory",
+ "openfang-runtime",
+ "openfang-types",
+ "regex-lite",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

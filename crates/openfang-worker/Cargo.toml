@@ -1,0 +1,62 @@
+[package]
+name = "openfang-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateless, bounded OpenFang job worker for Bittensor CPU sandboxes (Cathedral / ms.computer)"
+
+[[bin]]
+name = "openfang-worker"
+path = "src/main.rs"
+
+[dependencies]
+openfang-types = { path = "../openfang-types" }
+openfang-memory = { path = "../openfang-memory" }
+openfang-runtime = { path = "../openfang-runtime" }
+openfang-bittensor = { path = "../openfang-bittensor" }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+regex-lite = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+
+[[test]]
+name = "bounty_openai_compat"
+path = "../../tests/bounty/openai_compat.rs"
+
+[[test]]
+name = "bounty_provider_fail_closed"
+path = "../../tests/bounty/provider_fail_closed.rs"
+
+[[test]]
+name = "bounty_agent_tool_cycle"
+path = "../../tests/bounty/agent_tool_cycle.rs"
+
+[[test]]
+name = "bounty_tenant_isolation"
+path = "../../tests/bounty/tenant_isolation.rs"
+
+[[test]]
+name = "bounty_job_protocol"
+path = "../../tests/bounty/job_protocol.rs"
+
+[[test]]
+name = "bounty_cancellation"
+path = "../../tests/bounty/cancellation.rs"
