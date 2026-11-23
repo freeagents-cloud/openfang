@@ -96,6 +96,13 @@ impl EphemeralJobState {
             ..Default::default()
         });
 
+        // Always ground the model with the real current UTC date so it uses web_search
+        // for up-to-date facts instead of guessing from its training cutoff.
+        let today = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+        manifest.model.system_prompt.push_str(&format!(
+            "\n\nCurrent date and time: {today}.\nWhen asked about current events, release dates, prices, or any time-sensitive facts, use your web_search and web_fetch tools to verify up-to-date information before answering."
+        ));
+
         // Separate prior conversation history from the latest user turn.
         let mut history: Vec<Message> = Vec::with_capacity(job.messages.len());
         for m in &job.messages {
