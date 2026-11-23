@@ -14,7 +14,7 @@ use crate::session::EphemeralJobState;
 use crate::shutdown::spawn_signal_watcher;
 use anyhow::Result;
 use chrono::Utc;
-use openfang_bittensor::{BittensorProxyConfig, BittensorProxyDriver};
+use openfang_bittensor::{BittensorProxyConfig, BittensorProxyDriver, MeteringCallbacks};
 use openfang_runtime::agent_loop::run_agent_loop_streaming;
 use openfang_runtime::llm_driver::{LlmDriver, StreamEvent};
 use openfang_runtime::tool_runner::builtin_tool_definitions;
@@ -66,9 +66,9 @@ pub async fn execute_job_assignment(
 ) -> Result<JobRunOutcome> {
     let started_at = Utc::now();
 
-    // Fail-closed policy check BEFORE spinning up the agent loop or any tool.
-    let policy = match job.validate_and_build_policy() {
-        Ok(p) => p,
+    // Fail-closed policy + billing_context + selected_model validation BEFORE starting loop.
+    let resolved = match job.validate_and_resolve(&config.default_model) {
+        Ok(r) => r,
         Err(reason) => {
             error!(job_id = %job.job_id, error = %reason, "Rejected job due to policy validation failure");
             let complete = CompleteJobRequest {
@@ -80,7 +80,11 @@ pub async fn execute_job_assignment(
                 message: None,
                 usage: UsageSummary::default(),
                 provider: None,
-                model: job.model.clone(),
+                model: job
+                    .selected_model
+                    .as_ref()
+                    .map(|s| s.model_id.clone())
+                    .or_else(|| job.model.clone()),
                 finish_reason: "policy_rejected".to_string(),
                 timings: JobTimings {
                     started_at,
@@ -89,6 +93,9 @@ pub async fn execute_job_assignment(
                 },
                 sources: Vec::new(),
                 model_calls: Vec::new(),
+                model_call_ids: Vec::new(),
+                tool_call_ids: Vec::new(),
+                request_ids_seen: Vec::new(),
                 error: Some(reason.clone()),
             };
             let _ = submit_completion(&client, &config.server_url, config.job_token.as_str(), &complete).await;
@@ -103,7 +110,11 @@ pub async fn execute_job_assignment(
         }
     };
 
-    let mut state = EphemeralJobState::build(&job, &config.manifest_path, &config.default_model)?;
+    let policy = resolved.model_policy.clone();
+    let max_tool_calls = resolved.max_tool_calls;
+    let locked_model_id = resolved.selected_model_id.clone();
+
+    let mut state = EphemeralJobState::build(&job, &config.manifest_path, &locked_model_id)?;
 
     let (emitter, batcher_handle) = spawn_event_batcher(EventBatcherConfig {
         client: client.clone(),
@@ -138,6 +149,11 @@ pub async fn execute_job_assignment(
     let provider_slot = Arc::clone(&selected_provider);
     let model_slot = Arc::clone(&selected_model);
 
+    let started_emitter = emitter.clone();
+    let finished_emitter = emitter.clone();
+    let budget_emitter = emitter.clone();
+    let budget_cancel = cancel.clone();
+
     let proxy_driver = BittensorProxyDriver::new(BittensorProxyConfig {
         server_base_url: config.server_url.clone(),
         job_token: config.job_token.clone(),
@@ -145,6 +161,7 @@ pub async fn execute_job_assignment(
         attempt: job.attempt,
         trace_id: job.trace_id.clone(),
         policy,
+        locked_model_id: Some(locked_model_id.clone()),
     })?
     .with_on_provider_selected(Arc::new(move |provider, model| {
         *provider_slot.lock().expect("provider mutex") = Some(provider.to_string());
@@ -156,7 +173,33 @@ pub async fn execute_job_assignment(
                 "model": model,
             }),
         );
-    }));
+    }))
+    .with_metering_callbacks(MeteringCallbacks {
+        on_started: Some(Arc::new(move |ev| {
+            started_emitter.emit(
+                WorkerEventType::ModelCallStarted,
+                serde_json::to_value(ev).unwrap_or_else(|_| json!({})),
+            );
+        })),
+        on_finished: Some(Arc::new(move |ev| {
+            finished_emitter.emit(
+                WorkerEventType::ModelCallFinished,
+                serde_json::to_value(ev).unwrap_or_else(|_| json!({})),
+            );
+        })),
+        on_budget_exhausted: Some(Arc::new(move |limit_kind, observed_value, cap| {
+            budget_emitter.emit(
+                WorkerEventType::BudgetExhausted,
+                json!({
+                    "limit_kind": limit_kind,
+                    "observed_value": observed_value,
+                    "cap": cap,
+                    "safe_abort": true,
+                }),
+            );
+            budget_cancel.cancel(CancelReason::BudgetExhausted);
+        })),
+    });
 
     let telemetry = proxy_driver.telemetry();
     let driver: Arc<dyn LlmDriver> = Arc::new(proxy_driver);
@@ -192,12 +235,18 @@ pub async fn execute_job_assignment(
     let stream_emitter = emitter.clone();
     let sources_store: Arc<Mutex<Vec<SourceRecord>>> = Arc::new(Mutex::new(Vec::new()));
     let sources_for_stream = Arc::clone(&sources_store);
+    let tool_call_ids_store: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let tool_ids_for_stream = Arc::clone(&tool_call_ids_store);
+    let tool_cancel = cancel.clone();
     let max_output_bytes = job.limits.max_output_bytes;
 
     let stream_consumer = tokio::spawn(async move {
         let mut emitted_bytes: usize = 0;
+        let mut tool_calls_observed: u32 = 0;
         let mut seen_urls: HashSet<String> = HashSet::new();
         let mut pending_fetch_urls: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut tool_started_at: std::collections::HashMap<String, chrono::DateTime<Utc>> =
             std::collections::HashMap::new();
 
         while let Some(event) = stream_rx.recv().await {
@@ -211,6 +260,7 @@ pub async fn execute_job_assignment(
                     }
                 }
                 StreamEvent::ToolUseStart { id, name } => {
+                    tool_started_at.insert(id.clone(), Utc::now());
                     stream_emitter.emit(
                         WorkerEventType::ToolStarted,
                         json!({
@@ -232,6 +282,14 @@ pub async fn execute_job_assignment(
                     result_preview,
                     is_error,
                 } => {
+                    let ended_at = Utc::now();
+                    let started_at_ts = tool_started_at.remove(&id).unwrap_or(ended_at);
+                    tool_calls_observed = tool_calls_observed.saturating_add(1);
+                    tool_ids_for_stream
+                        .lock()
+                        .expect("tool_ids mutex")
+                        .push(id.clone());
+
                     let safe_preview = redact_sensitive(&result_preview);
                     stream_emitter.emit(
                         WorkerEventType::ToolFinished,
@@ -242,6 +300,29 @@ pub async fn execute_job_assignment(
                             "preview": truncate_utf8(&safe_preview, 512),
                         }),
                     );
+                    stream_emitter.emit(
+                        WorkerEventType::ToolMetered,
+                        json!({
+                            "tool_call_id": id,
+                            "tool_kind": name,
+                            "started_at": started_at_ts,
+                            "ended_at": ended_at,
+                            "success": !is_error,
+                        }),
+                    );
+
+                    if max_tool_calls > 0 && tool_calls_observed >= max_tool_calls {
+                        stream_emitter.emit(
+                            WorkerEventType::BudgetExhausted,
+                            json!({
+                                "limit_kind": "max_tool_calls",
+                                "observed_value": tool_calls_observed,
+                                "cap": max_tool_calls,
+                                "safe_abort": true,
+                            }),
+                        );
+                        tool_cancel.cancel(CancelReason::BudgetExhausted);
+                    }
 
                     if !is_error && matches!(name.as_str(), "web_search" | "web_fetch") {
                         let mut extracted = extract_urls(&result_preview);
@@ -353,6 +434,15 @@ pub async fn execute_job_assignment(
     let duration_ms = (finished_at - started_at).num_milliseconds().max(0) as u64;
     let (input_tokens, output_tokens) = telemetry.totals();
     let model_calls = telemetry.snapshot();
+    let model_call_ids: Vec<String> = model_calls
+        .iter()
+        .map(|mc| mc.model_call_id.clone())
+        .collect();
+    let request_ids_seen: Vec<String> = model_calls
+        .iter()
+        .filter_map(|mc| mc.provider_request_id.clone())
+        .collect();
+    let tool_call_ids = tool_call_ids_store.lock().expect("tool_ids mutex").clone();
     let sources = sources_store.lock().expect("sources mutex").clone();
     let provider = selected_provider.lock().expect("provider mutex").clone();
     let model = selected_model.lock().expect("model mutex").clone();
@@ -445,6 +535,9 @@ pub async fn execute_job_assignment(
         },
         sources: sources.clone(),
         model_calls,
+        model_call_ids,
+        tool_call_ids,
+        request_ids_seen,
         error: error_msg,
     };
 

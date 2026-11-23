@@ -1,0 +1,24 @@
+# Local Docker Compose for building and running the FreeAgents OpenFang bounty worker
+# Usage:
+#   docker compose -f docker-compose.worker.yml build
+#   OPENFANG_JOB_TOKEN=<token> JOB_ID=<uuid> docker compose -f docker-compose.worker.yml run --rm worker
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+      args:
+        LTO: "false"
+        CODEGEN_UNITS: "16"
+    image: freeagents/openfang-worker:local
+    environment:
+      OPENFANG_JOB_TOKEN: ${OPENFANG_JOB_TOKEN:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    command:
+      - "run"
+      - "--job-id"
+      - "${JOB_ID:-00000000-0000-0000-0000-000000000000}"
+      - "--server"
+      - "${SERVER_URL:-http://host.docker.internal:8080}"
+      - "--allow-insecure-http"

@@ -44,6 +44,8 @@ pub struct MockServerState {
     pub scripted_sse_responses: Arc<Mutex<Vec<Vec<String>>>>,
     /// If > 0, return HTTP 503 for this many inference calls before succeeding (for fallback tests).
     pub fail_inference_first_n: Arc<AtomicU32>,
+    /// If true, `/internal/v1/inference/chat` returns HTTP 402 `budget_exhausted`.
+    pub force_budget_exhausted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockServerState {
@@ -90,6 +92,43 @@ impl MockServerState {
                     "completion_tokens": 12,
                     "total_tokens": 36
                 }
+            })
+            .to_string(),
+        );
+        frames.push("[DONE]".to_string());
+        self.scripted_sse_responses
+            .lock()
+            .expect("sse mutex")
+            .push(frames);
+    }
+
+    pub fn push_text_sse_response_without_usage(&self, chunks: &[&str]) {
+        let mut frames = Vec::new();
+        for chunk in chunks {
+            frames.push(
+                json!({
+                    "id": "chatcmpl-no-usage",
+                    "object": "chat.completion.chunk",
+                    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "content": chunk },
+                        "finish_reason": Value::Null
+                    }]
+                })
+                .to_string(),
+            );
+        }
+        frames.push(
+            json!({
+                "id": "chatcmpl-no-usage",
+                "object": "chat.completion.chunk",
+                "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
             })
             .to_string(),
         );
@@ -254,6 +293,14 @@ async fn handle_inference(
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
 
+    if state.force_budget_exhausted.load(Ordering::SeqCst) {
+        return (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(json!({ "error": { "code": "budget_exhausted", "message": "budget_exhausted: job provider cost cap reached" } })),
+        )
+            .into_response();
+    }
+
     let fail_rem = state.fail_inference_first_n.load(Ordering::SeqCst);
     if fail_rem > 0 {
         state.fail_inference_first_n.fetch_sub(1, Ordering::SeqCst);
@@ -335,6 +382,8 @@ pub fn sample_job(job_id: &str, prompt: &str) -> JobAssignment {
         },
         trace_id: format!("trace-{job_id}"),
         model: Some("bittensor-test-model".to_string()),
+        billing_context: None,
+        selected_model: None,
     }
 }
 

@@ -60,3 +60,23 @@ path = "../../tests/bounty/job_protocol.rs"
 [[test]]
 name = "bounty_cancellation"
 path = "../../tests/bounty/cancellation.rs"
+
+[[test]]
+name = "bounty_metering_streaming"
+path = "../../tests/bounty/metering_streaming.rs"
+
+[[test]]
+name = "bounty_provider_usage_missing"
+path = "../../tests/bounty/provider_usage_missing.rs"
+
+[[test]]
+name = "bounty_retry_deduplication"
+path = "../../tests/bounty/retry_deduplication.rs"
+
+[[test]]
+name = "bounty_budget_exhaustion"
+path = "../../tests/bounty/budget_exhaustion.rs"
+
+[[test]]
+name = "bounty_no_wallet_or_billing_secrets"
+path = "../../tests/bounty/no_wallet_or_billing_secrets.rs"

@@ -53,10 +53,12 @@ impl EphemeralJobState {
             .filter(|t| matches!(t.as_str(), "web_search" | "web_fetch"))
             .cloned()
             .collect();
-        // 4. Bind model ID and hard turn/token limits from Server.
+        // 4. Bind authoritative model ID (selected_model > job.model > default) and hard limits.
         let model_id = job
-            .model
-            .as_deref()
+            .selected_model
+            .as_ref()
+            .map(|s| s.model_id.as_str())
+            .or(job.model.as_deref())
             .filter(|m| !m.trim().is_empty())
             .unwrap_or(default_model)
             .to_string();

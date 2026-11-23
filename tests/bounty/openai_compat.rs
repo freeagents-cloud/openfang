@@ -31,6 +31,7 @@ async fn streaming_preserves_text_usage_and_bittensor_headers() {
         attempt: 2,
         trace_id: "trace-abc".into(),
         policy,
+        locked_model_id: None,
     })
     .unwrap();
 
@@ -94,6 +95,7 @@ async fn fails_over_engy_to_chutes_before_output_emitted() {
         attempt: 1,
         trace_id: "trace-fb".into(),
         policy,
+        locked_model_id: None,
     })
     .unwrap();
 

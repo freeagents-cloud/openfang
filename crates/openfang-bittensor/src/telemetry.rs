@@ -1,5 +1,6 @@
 //! Per-model-call provenance and telemetry records.
 
+use crate::metering::UsageSource;
 use crate::providers::BittensorProvider;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use std::sync::{Arc, Mutex};
 /// Provenance record captured for every LLM call made through the Bittensor proxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCallRecord {
+    pub model_call_id: String,
     pub provider: BittensorProvider,
     pub model_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -18,6 +20,7 @@ pub struct ModelCallRecord {
     pub finished_at: DateTime<Utc>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub usage_source: UsageSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub trace_id: String,

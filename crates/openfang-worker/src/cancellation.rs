@@ -12,6 +12,8 @@ pub enum CancelReason {
     LeaseOrTokenRevoked(u16),
     /// Job exceeded `limits.deadline_ms`.
     DeadlineExceeded,
+    /// Server or local policy reported hard spend/call/token budget exhaustion.
+    BudgetExhausted,
     /// Process received `SIGTERM` or `SIGINT`.
     Signal,
 }
@@ -22,6 +24,7 @@ impl CancelReason {
             Self::ServerCancelled => "server_cancelled",
             Self::LeaseOrTokenRevoked(_) => "lease_or_token_revoked",
             Self::DeadlineExceeded => "deadline_exceeded",
+            Self::BudgetExhausted => "budget_exhausted",
             Self::Signal => "signal",
         }
     }

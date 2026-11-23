@@ -4,6 +4,7 @@
 //! upstream `openfang-runtime` agent loop (`run_agent_loop_streaming`),
 //! `openfang-bittensor`'s fail-closed proxy driver, and ephemeral per-job state.
 
+pub mod billing_policy;
 pub mod cancellation;
 pub mod config;
 pub mod events;

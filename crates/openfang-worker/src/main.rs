@@ -109,7 +109,9 @@ async fn run_cli() -> Result<ExitCode> {
                 heartbeat_interval_ms: file_cfg.heartbeat_interval_ms.unwrap_or(15_000),
                 default_model: default_model
                     .or(file_cfg.default_model)
-                    .unwrap_or_else(|| "default".to_string()),
+                    .unwrap_or_else(|| {
+                        openfang_bittensor::DEFAULT_DAY_ONE_MODEL_ID.to_string()
+                    }),
                 web_search_provider: file_cfg
                     .web_search_provider
                     .unwrap_or_else(|| "duckduckgo".to_string()),

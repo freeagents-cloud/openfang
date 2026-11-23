@@ -12,8 +12,8 @@ event_max_batch_size = 32
 # Extend the attempt lease every 15 seconds.
 heartbeat_interval_ms = 15000
 
-# Default model ID if the Server job assignment omits an explicit model.
-default_model = "default"
+# Default model ID if the Server job assignment omits selected_model/model (Appendix A §A.7).
+default_model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 # Web search provider: "duckduckgo" (keyless) or "searxng"
 web_search_provider = "duckduckgo"

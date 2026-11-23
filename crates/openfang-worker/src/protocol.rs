@@ -2,8 +2,11 @@
 //!
 //! Authoritative schema owner: `freeagents-cloud/server/openapi/internal-worker.v1.yaml`.
 
+use crate::billing_policy::{
+    resolve_billing_policy, BillingContext, ResolvedBillingPolicy, SelectedModelSnapshot,
+};
 use chrono::{DateTime, Utc};
-use openfang_bittensor::{BittensorModelPolicy, BudgetLimits, ModelCallRecord};
+use openfang_bittensor::{BittensorModelPolicy, ModelCallRecord, DEFAULT_DAY_ONE_MODEL_ID};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,6 +30,12 @@ pub struct JobAssignment {
     pub trace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Policy-only billing limits supplied by Server (Appendix A §A.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_context: Option<BillingContext>,
+    /// Authoritative model snapshot selected by Server (Appendix A §A.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<SelectedModelSnapshot>,
 }
 
 /// Conversation message supplied by Server.
@@ -82,8 +91,9 @@ impl Default for JobLimits {
 }
 
 impl JobAssignment {
-    /// Validate protocol version, immutable identity fields, and fail-closed Bittensor policy.
-    pub fn validate_and_build_policy(&self) -> Result<BittensorModelPolicy, String> {
+    /// Validate protocol version, immutable identity fields, billing context,
+    /// authoritative `selected_model`, and fail-closed Bittensor policy.
+    pub fn validate_and_resolve(&self, fallback_model: &str) -> Result<ResolvedBillingPolicy, String> {
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(format!(
                 "unsupported protocol_version {} (expected {PROTOCOL_VERSION})",
@@ -106,17 +116,32 @@ impl JobAssignment {
             return Err("limits.deadline_ms must be >= 1".to_string());
         }
 
-        let budgets = BudgetLimits {
-            max_tokens: self.limits.max_tokens,
-            max_model_calls: self.limits.max_agent_turns.saturating_mul(2).max(2),
-        };
+        let effective_fallback = self
+            .model
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(if fallback_model.trim().is_empty() {
+                DEFAULT_DAY_ONE_MODEL_ID
+            } else {
+                fallback_model
+            });
 
-        BittensorModelPolicy::from_raw(
+        resolve_billing_policy(
             &self.model_policy.allowed_providers,
             self.model_policy.preferred.as_deref(),
-            budgets,
+            self.selected_model.as_ref(),
+            self.billing_context.as_ref(),
+            &self.allowed_tools,
+            self.limits.max_agent_turns,
+            self.limits.max_tokens,
+            effective_fallback,
         )
-        .map_err(|e| e.to_string())
+    }
+
+    /// Backwards-compatible helper returning only the validated [`BittensorModelPolicy`].
+    pub fn validate_and_build_policy(&self) -> Result<BittensorModelPolicy, String> {
+        self.validate_and_resolve(DEFAULT_DAY_ONE_MODEL_ID)
+            .map(|r| r.model_policy)
     }
 }
 
@@ -132,17 +157,22 @@ pub struct WorkerEvent {
     pub data: Value,
 }
 
-/// Event types defined by Spec §4.3.
+/// Event types defined by Spec §4.3 and Appendix A §A.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerEventType {
     Started,
     ProviderSelected,
+    ModelCallStarted,
+    ModelCallFinished,
     TextDelta,
     ToolStarted,
     ToolFinished,
+    ToolMetered,
     SourceFound,
     Usage,
+    BudgetWarning,
+    BudgetExhausted,
     Checkpoint,
     Completed,
     Failed,
@@ -237,6 +267,15 @@ pub struct CompleteJobRequest {
     pub sources: Vec<SourceRecord>,
     #[serde(default)]
     pub model_calls: Vec<ModelCallRecord>,
+    /// Stable model call IDs observed during this attempt (Appendix A §A.3).
+    #[serde(default)]
+    pub model_call_ids: Vec<String>,
+    /// Stable tool call IDs observed during this attempt (Appendix A §A.3).
+    #[serde(default)]
+    pub tool_call_ids: Vec<String>,
+    /// Provider request IDs observed during this attempt (Appendix A §A.3).
+    #[serde(default)]
+    pub request_ids_seen: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
