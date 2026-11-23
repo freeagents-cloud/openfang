@@ -1,3 +1,55 @@
+# FreeAgents Cloud — OpenFang Fork (`openfang-worker`)
+
+> Fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) (`v0.6.9`, upstream SHA `acf2587`, licensed `Apache-2.0 OR MIT`). Upstream documentation is preserved below.
+
+This fork adds two crates—[`openfang-bittensor`](crates/openfang-bittensor) (fail-closed Bittensor-only inference routing for Chutes, Engy, and SayGM + Appendix A usage metering) and [`openfang-worker`](crates/openfang-worker) (stateless, outbound-only job executor)—so the real OpenFang Rust agent loop executes inside a **Cathedral Bittensor CPU confidential sandbox** (`amd_sev_snp`).
+
+- **Specs & Docs:** [01-OPENFANG-SPEC.md](01-OPENFANG-SPEC.md) · [APPENDIX-OPENFANG-USAGE-METERING.md](APPENDIX-OPENFANG-USAGE-METERING.md) · [docs/FREEAGENTS-BOUNTY.md](docs/FREEAGENTS-BOUNTY.md) · [docs/WORKER-PROTOCOL.md](docs/WORKER-PROTOCOL.md) · [docs/METERING-PROTOCOL.md](docs/METERING-PROTOCOL.md) · [docs/EVIDENCE.md](docs/EVIDENCE.md)
+
+## Deploying `openfang-worker` to Cathedral (Production)
+
+`openfang-worker` does **not** expose any inbound TCP port, hold database credentials, or hold permanent LLM/Stripe/TAO keys. It is packaged as a pinned Linux `x86_64` OCI image and invoked on demand by [`freeagents-cloud/server`](https://github.com/freeagents-cloud/server).
+
+### 1. Verify tests and lints
+```bash
+cargo clippy -p openfang-bittensor -p openfang-worker --tests -- -D warnings
+cargo test -p openfang-bittensor -p openfang-worker
+```
+
+### 2. Build & push the pinned `linux/amd64` OCI image
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -f docker/Dockerfile.worker \
+  -t ghcr.io/freeagents-cloud/openfang-worker:$(git rev-parse --short HEAD) \
+  --push .
+```
+
+### 3. Record the immutable digest & pin it in `server`
+```bash
+docker buildx imagetools inspect ghcr.io/freeagents-cloud/openfang-worker:$(git rev-parse --short HEAD) \
+  | grep Digest
+```
+Copy the resulting `sha256:...` digest into `server`'s `WORKER_IMAGE_DIGEST` environment variable (and register/allowlist the custom image in your Cathedral account per [Cathedral custom images docs](https://cathedral.computer/docs/sandboxes/custom-images/)).
+
+### 4. Local Docker testing against a local `server`
+```bash
+docker compose -f docker-compose.worker.yml build
+
+OPENFANG_JOB_TOKEN="<short-lived-job-token>" \
+JOB_ID="<job-uuid>" \
+SERVER_URL="http://host.docker.internal:18080" \
+docker compose -f docker-compose.worker.yml run --rm worker
+```
+
+### Runtime invocation contract
+```bash
+openfang-worker run --job-id <uuid> --server https://api.freeagents.cloud
+```
+Required runtime env (injected per-job by Cathedral): `OPENFANG_JOB_TOKEN` (short-lived single-job-single-attempt bearer token; never logged or persisted).
+
+---
+
 <p align="center">
   <img src="public/assets/openfang-logo.png" width="160" alt="OpenFang Logo" />
 </p>
