@@ -7,16 +7,23 @@ use anyhow::{Context, Result};
 use openfang_memory::session::Session;
 use openfang_memory::MemorySubstrate;
 use openfang_types::agent::{AgentId, AgentManifest, AutonomousConfig, SessionId};
+use openfang_types::config::MemoryConfig;
 use openfang_types::message::Message;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-/// Isolated ephemeral workspace + in-memory substrate for a single job attempt.
+/// Deterministic agent ID within a tenant's isolated SQLite `MemorySubstrate`
+/// so cross-conversation RAG (`remember`/`recall`) links facts across conversations
+/// for the same user while never crossing tenant boundaries.
+pub const TENANT_AGENT_ID: AgentId = AgentId(Uuid::nil());
+
+/// Isolated per-job workspace + tenant-scoped SQLite `MemorySubstrate`.
 ///
 /// Automatically removes the temporary directory when dropped.
 pub struct EphemeralJobState {
     pub temp_dir: TempDir,
+    pub memory_db_path: PathBuf,
     pub memory: MemorySubstrate,
     pub session: Session,
     pub latest_user_message: String,
@@ -25,16 +32,35 @@ pub struct EphemeralJobState {
 
 impl EphemeralJobState {
     /// Create fresh, isolated per-job state from the Server's `JobAssignment`
-    /// and the bounty manifest file.
+    /// and the bounty manifest file (without pre-populated memory).
     pub fn build(job: &JobAssignment, manifest_path: &Path, default_model: &str) -> Result<Self> {
+        Self::build_with_memory(job, manifest_path, default_model, None)
+    }
+
+    /// Create per-job state backed by OpenFang's real SQLite `MemorySubstrate`
+    /// hydrated from the tenant's persisted SQLite blob (if any).
+    pub fn build_with_memory(
+        job: &JobAssignment,
+        manifest_path: &Path,
+        default_model: &str,
+        persisted_memory_sqlite: Option<&[u8]>,
+    ) -> Result<Self> {
         let temp_dir = tempfile::Builder::new()
             .prefix(&format!("openfang-job-{}-", job.job_id))
             .tempdir()
             .context("failed to create ephemeral per-job temp directory")?;
 
-        // Pure in-memory SQLite substrate — zero cross-job persistence or shared memory.
-        let memory = MemorySubstrate::open_in_memory(0.05)
-            .map_err(|e| anyhow::anyhow!("failed to initialize ephemeral MemorySubstrate: {e}"))?;
+        let memory_db_path = temp_dir.path().join("memory.db");
+        if let Some(bytes) = persisted_memory_sqlite {
+            if !bytes.is_empty() {
+                std::fs::write(&memory_db_path, bytes)
+                    .context("failed to hydrate tenant memory.db")?;
+            }
+        }
+
+        // OpenFang's real SQLite-backed MemorySubstrate (semantic RAG + structured + knowledge).
+        let memory = MemorySubstrate::open(&memory_db_path, 0.05, &MemoryConfig::default())
+            .map_err(|e| anyhow::anyhow!("failed to initialize tenant MemorySubstrate: {e}"))?;
 
         let mut manifest = load_bounty_manifest(manifest_path)?;
 
@@ -88,7 +114,7 @@ impl EphemeralJobState {
 
         let session = Session {
             id: SessionId(Uuid::new_v4()),
-            agent_id: AgentId(Uuid::new_v4()),
+            agent_id: TENANT_AGENT_ID,
             messages: history,
             context_window_tokens: 0,
             label: Some(format!("job:{}:attempt:{}", job.job_id, job.attempt)),
@@ -96,6 +122,7 @@ impl EphemeralJobState {
 
         Ok(Self {
             temp_dir,
+            memory_db_path,
             memory,
             session,
             latest_user_message,
@@ -117,5 +144,46 @@ fn load_bounty_manifest(path: &Path) -> Result<AgentManifest> {
         let manifest: AgentManifest =
             toml::from_str(embedded).context("failed to parse embedded freeagents-bounty.toml")?;
         Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openfang_types::memory::{Memory, MemoryFilter, MemorySource};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn cross_conversation_rag_persists_and_recalls_across_sqlite_hydration() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let db1 = dir1.path().join("memory.db");
+        {
+            let mem1 = MemorySubstrate::open(&db1, 0.05, &MemoryConfig::default()).unwrap();
+            mem1.remember(
+                TENANT_AGENT_ID,
+                "User prefers dark roast espresso and uses Rust on macOS.",
+                MemorySource::Conversation,
+                "conversation",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        }
+        let persisted_bytes = std::fs::read(&db1).unwrap();
+        assert!(!persisted_bytes.is_empty());
+
+        // Hydrate into a brand-new sandbox directory (Conversation 2) and recall.
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = dir2.path().join("memory.db");
+        std::fs::write(&db2, &persisted_bytes).unwrap();
+        let mem2 = MemorySubstrate::open(&db2, 0.05, &MemoryConfig::default()).unwrap();
+        let recalled = mem2
+            .recall("espresso", 5, Some(MemoryFilter::agent(TENANT_AGENT_ID)))
+            .await
+            .unwrap();
+        assert!(
+            recalled.iter().any(|f| f.content.contains("dark roast espresso")),
+            "expected cross-conversation RAG recall to find persisted fact, got: {recalled:?}"
+        );
     }
 }

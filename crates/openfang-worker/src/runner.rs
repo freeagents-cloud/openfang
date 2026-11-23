@@ -22,9 +22,10 @@ use openfang_runtime::web_cache::WebCache;
 use openfang_runtime::web_fetch::WebFetchEngine;
 use openfang_runtime::web_search::{WebSearchEngine, WebToolsContext};
 use openfang_types::config::{SearchProvider, WebConfig, WebFetchConfig};
+use openfang_types::memory::{Memory, MemoryFilter, MemorySource};
 use regex_lite::Regex;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -114,7 +115,46 @@ pub async fn execute_job_assignment(
     let max_tool_calls = resolved.max_tool_calls;
     let locked_model_id = resolved.selected_model_id.clone();
 
-    let mut state = EphemeralJobState::build(&job, &config.manifest_path, &locked_model_id)?;
+    // Hydrate tenant's persisted OpenFang MemorySubstrate (SQLite) for cross-conversation RAG.
+    let persisted_memory =
+        download_tenant_memory(&client, &config.server_url, &job.job_id, config.job_token.as_str())
+            .await;
+
+    let mut state = EphemeralJobState::build_with_memory(
+        &job,
+        &config.manifest_path,
+        &locked_model_id,
+        persisted_memory.as_deref(),
+    )?;
+
+    // Cross-conversation RAG recall via OpenFang's built-in SemanticStore.
+    if !state.latest_user_message.trim().is_empty() {
+        let filter = MemoryFilter::agent(state.session.agent_id);
+        match state
+            .memory
+            .recall(&state.latest_user_message, 6, Some(filter))
+            .await
+        {
+            Ok(fragments) if !fragments.is_empty() => {
+                let mut block = String::from(
+                    "\n\n## Recalled Memory from Previous Conversations\nUse these recalled user facts when relevant:\n",
+                );
+                for frag in fragments {
+                    let snippet = truncate_utf8(frag.content.trim(), 400);
+                    if !snippet.is_empty() {
+                        block.push_str("- ");
+                        block.push_str(snippet);
+                        block.push('\n');
+                    }
+                }
+                state.manifest.model.system_prompt.push_str(&block);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(job_id = %job.job_id, error = %e, "OpenFang memory recall failed; continuing without recalled context");
+            }
+        }
+    }
 
     let (emitter, batcher_handle) = spawn_event_batcher(EventBatcherConfig {
         client: client.clone(),
@@ -504,6 +544,59 @@ pub async fn execute_job_assignment(
         }
     };
 
+    // Persist new turn facts into OpenFang's SemanticStore and upload updated SQLite blob.
+    let crate::session::EphemeralJobState {
+        temp_dir,
+        memory_db_path,
+        memory,
+        session,
+        latest_user_message,
+        ..
+    } = state;
+    if status == TerminalStatus::Completed && !latest_user_message.trim().is_empty() {
+        let user_snippet = truncate_utf8(latest_user_message.trim(), 600);
+        let assistant_snippet = message
+            .as_deref()
+            .map(|m| truncate_utf8(m.trim(), 400))
+            .unwrap_or("");
+        let fact = if assistant_snippet.is_empty() {
+            format!("User: {user_snippet}")
+        } else {
+            format!("User: {user_snippet}\nAssistant: {assistant_snippet}")
+        };
+        let mut meta = HashMap::new();
+        meta.insert("conversation_id".to_string(), json!(job.conversation_id));
+        if let Err(e) = memory
+            .remember(
+                session.agent_id,
+                &fact,
+                MemorySource::Conversation,
+                "conversation",
+                meta,
+            )
+            .await
+        {
+            warn!(job_id = %job.job_id, error = %e, "Failed to store turn in OpenFang MemorySubstrate");
+            drop(memory);
+        } else {
+            // Drop MemorySubstrate so SQLite closes cleanly and checkpoints WAL into memory.db.
+            drop(memory);
+            if let Ok(bytes) = std::fs::read(&memory_db_path) {
+                upload_tenant_memory(
+                    &client,
+                    &config.server_url,
+                    &job.job_id,
+                    config.job_token.as_str(),
+                    bytes,
+                )
+                .await;
+            }
+        }
+    } else {
+        drop(memory);
+    }
+    drop(temp_dir);
+
     // Stop background heartbeat & signal watcher, then flush ALL pending events before complete.
     cancel.cancel(CancelReason::ServerCancelled);
     heartbeat_handle.abort();
@@ -559,9 +652,6 @@ pub async fn execute_job_assignment(
         duration_ms,
         "Worker finished job attempt"
     );
-
-    // `state` (including TempDir and in-memory SQLite) is dropped and cleaned up here.
-    drop(state);
 
     Ok(JobRunOutcome {
         job_id: job.job_id,
@@ -659,4 +749,46 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
         idx -= 1;
     }
     &s[..idx]
+}
+
+async fn download_tenant_memory(
+    client: &reqwest::Client,
+    server_url: &str,
+    job_id: &str,
+    job_token: &str,
+) -> Option<Vec<u8>> {
+    let url = format!(
+        "{}/internal/v1/jobs/{job_id}/memory",
+        server_url.trim_end_matches('/')
+    );
+    match client.get(&url).bearer_auth(job_token).send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => match resp.bytes().await {
+            Ok(b) if !b.is_empty() => Some(b.to_vec()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+async fn upload_tenant_memory(
+    client: &reqwest::Client,
+    server_url: &str,
+    job_id: &str,
+    job_token: &str,
+    sqlite_bytes: Vec<u8>,
+) {
+    let url = format!(
+        "{}/internal/v1/jobs/{job_id}/memory",
+        server_url.trim_end_matches('/')
+    );
+    if let Err(e) = client
+        .put(&url)
+        .bearer_auth(job_token)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(sqlite_bytes)
+        .send()
+        .await
+    {
+        warn!(job_id = %job_id, error = %e, "Failed to upload updated tenant MemorySubstrate");
+    }
 }
